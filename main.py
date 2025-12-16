@@ -1,130 +1,350 @@
 import cv2
 import numpy as np
+import matplotlib.pyplot as plt
 import os
 
+# --- PATH SETUP ---
+try:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(script_dir)
+except NameError:
+    print("⚠️ Jupyter mode detected.")
+
 # --- CONFIGURATION ---
-REDNESS_THRESHOLD = 0.5  # Lowered slightly to be more sensitive
-FATIGUE_THRESHOLD = 90     # Raised slightly (brightness < 90 = fatigue)
-SYMMETRY_TOLERANCE = 0.15 
-# ---------------------
+# Severity Thresholds for Redness
+REDNESS_MILD = 0.15      # 15% - Mild irritation
+REDNESS_MODERATE = 0.17  # 18% - Moderate irritation
+REDNESS_SEVERE = 0.19    # 36% - Severe irritation
 
-class EyeAnalyzer:
+# Severity Thresholds for Fatigue (Brightness)
+FATIGUE_MILD = 130       # Brightness < 130 = Mild fatigue
+FATIGUE_MODERATE = 110   # Brightness < 110 = Moderate fatigue
+FATIGUE_SEVERE = 90      # Brightness < 90 = Severe fatigue
+
+SYMMETRY_TOLERANCE = 0.02 # 2% difference triggers alert
+
+class EyeLab:
     def __init__(self):
-        # 1. Verify Haar Paths (Debug Step)
-        face_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        eye_path = cv2.data.haarcascades + 'haarcascade_eye.xml'
-        
-        print(f"Looking for Face XML at: {face_path}")
-        print(f"Looking for Eye XML at: {eye_path}")
-        
-        # 2. Load Classifiers
-        self.face_cascade = cv2.CascadeClassifier(face_path)
-        self.eye_cascade = cv2.CascadeClassifier(eye_path)
-        
-        # Check if they loaded
-        if self.face_cascade.empty():
-            print("❌ ERROR: Face Cascade failed to load! Check opencv install.")
-        if self.eye_cascade.empty():
-            print("❌ ERROR: Eye Cascade failed to load!")
+        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        self.eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
 
-    def analyze_eye_region(self, eye_roi):
-        # [cite_start]FATIGUE (Avg Brightness) [cite: 55]
-        gray_eye = cv2.cvtColor(eye_roi, cv2.COLOR_BGR2GRAY)
-        avg_brightness = np.mean(gray_eye)
+    def analyze_single_eye(self, eye_roi):
+        """
+        Runs the SCLERA-LOCKED pipeline on a SINGLE eye crop.
+        """
+        # 1. CROP: Aggressive crop (Top/Bottom 25%)
+        h, w, _ = eye_roi.shape
+        y1, y2 = int(h*0.25), int(h*0.75) 
+        crop = eye_roi[y1:y2, :]
         
-        # [cite_start]REDNESS (HSV) [cite: 41, 44]
-        hsv_eye = cv2.cvtColor(eye_roi, cv2.COLOR_BGR2HSV)
+        # Convert to HSV
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         
-        # [cite_start]Red Masks [cite: 45]
-        lower_red1 = np.array([0, 50, 50])
-        upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([170, 50, 50])
-        upper_red2 = np.array([180, 255, 255])
+        # --- 2. SCLERA (WHITE) DETECTION ---
+        lower_white = np.array([0, 0, 120]) 
+        upper_white = np.array([180, 60, 255])
+        sclera_mask = cv2.inRange(hsv, lower_white, upper_white)
         
-        mask = cv2.inRange(hsv_eye, lower_red1, upper_red1) + cv2.inRange(hsv_eye, lower_red2, upper_red2)
-        
-        # [cite_start]Ratio [cite: 47]
-        red_pixels = cv2.countNonZero(mask)
-        total_pixels = eye_roi.shape[0] * eye_roi.shape[1]
-        redness_ratio = red_pixels / total_pixels if total_pixels > 0 else 0
-        
-        return avg_brightness, redness_ratio
+        kernel = np.ones((3,3), np.uint8)
+        sclera_context = cv2.dilate(sclera_mask, kernel, iterations=2)
 
-    def run(self):
-        # Try Index 0 first, if fails try 1 (common mac issue)
-        cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
-        if not cap.isOpened():
-             cap = cv2.VideoCapture(1, cv2.CAP_AVFOUNDATION)
+        # --- 3. RED VESSEL DETECTION ---
+        lower_red1 = np.array([0, 70, 100]); upper_red1 = np.array([10, 255, 255])
+        lower_red2 = np.array([170, 70, 100]); upper_red2 = np.array([180, 255, 255])
         
-        if not cap.isOpened():
-            print("❌ Error: Could not open ANY camera.")
-            return
-
-        print("✅ Camera active. Press 'q' to quit.")
-
-        while True:
-            ret, frame = cap.read()
-            if not ret: break
-
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        raw_red = cv2.inRange(hsv, lower_red1, upper_red1) + cv2.inRange(hsv, lower_red2, upper_red2)
+        
+        # --- 4. THE INTERSECTION ---
+        true_vessels = cv2.bitwise_and(raw_red, raw_red, mask=sclera_context)
+        
+        # 5. CALCULATE STATS
+        red_pixels = cv2.countNonZero(true_vessels)
+        sclera_area = cv2.countNonZero(sclera_context)
+        
+        if sclera_area == 0: sclera_area = 1 
+        
+        red_ratio = red_pixels / sclera_area
+        
+        # Brightness (Average of the white area only)
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        brightness = cv2.mean(gray, mask=sclera_context)[0]
+        
+        # 6. SEVERITY CLASSIFICATION
+        # Determine Irritation Severity
+        if red_ratio >= REDNESS_SEVERE:
+            irritation_level = "Severe"
+        elif red_ratio >= REDNESS_MODERATE:
+            irritation_level = "Moderate"
+        elif red_ratio >= REDNESS_MILD:
+            irritation_level = "Mild"
+        else:
+            irritation_level = None
+        
+        # Determine Fatigue Severity
+        if brightness < FATIGUE_SEVERE:
+            fatigue_level = "Severe"
+        elif brightness < FATIGUE_MODERATE:
+            fatigue_level = "Moderate"
+        elif brightness < FATIGUE_MILD:
+            fatigue_level = "Mild"
+        else:
+            fatigue_level = None
+        
+        # Combined Status with Severity
+        if fatigue_level and irritation_level:
+            status = f"{fatigue_level} Fatigue & {irritation_level} Irritation"
+            severity = max(self._severity_score(fatigue_level), self._severity_score(irritation_level))
+        elif fatigue_level:
+            status = f"{fatigue_level} Fatigue"
+            severity = self._severity_score(fatigue_level)
+        elif irritation_level:
+            status = f"{irritation_level} Irritation"
+            severity = self._severity_score(irritation_level)
+        else:
+            status = "Normal"
+            severity = 0
             
-            # --- TWEAKED DETECTION SETTINGS ---
-            # scaleFactor=1.1 (Checks more scales, slower but catches more faces)
-            # minNeighbors=4 (Less strict, 3 might cause glitches, 5 is too strict)
-            faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4)
+        return {
+            "status": status,
+            "severity": severity,
+            "irritation_level": irritation_level,
+            "fatigue_level": fatigue_level,
+            "redness": red_ratio,
+            "brightness": brightness,
+            "crop": crop,
+            "vessel_mask": true_vessels
+        }
+    
+    def _severity_score(self, level):
+        """Convert severity level to numeric score for comparison"""
+        scores = {"Mild": 1, "Moderate": 2, "Severe": 3}
+        return scores.get(level, 0)
+    
+    def get_recommendations(self, results):
+        """Generate personalized recommendations based on eye analysis"""
+        recommendations = []
+        max_severity = 0
+        has_fatigue = False
+        has_irritation = False
+        asymmetric = False
+        
+        # Analyze all eyes
+        for res in results:
+            if res['severity'] > max_severity:
+                max_severity = res['severity']
+            if res['fatigue_level']:
+                has_fatigue = True
+            if res['irritation_level']:
+                has_irritation = True
+        
+        # Check asymmetry
+        if len(results) == 2:
+            diff = abs(results[0]['redness'] - results[1]['redness'])
+            if diff > SYMMETRY_TOLERANCE:
+                asymmetric = True
+        
+        # Generate recommendations based on conditions
+        if max_severity >= 3:  # Severe
+            recommendations.append("URGENT: Severe eye condition detected")
+            recommendations.append("Consult an eye doctor immediately")
+            recommendations.append("Avoid rubbing your eyes")
+        
+        if has_fatigue and has_irritation:
+            recommendations.append("Take an immediate 10-15 minute break")
+            recommendations.append("Use lubricating eye drops")
+            recommendations.append("Consider getting more sleep tonight")
+        elif has_fatigue:
+            if max_severity >= 2:  # Moderate or Severe
+                recommendations.append("Take a 10-minute break from screens")
+                recommendations.append("Rest in a dark, quiet room")
+            else:
+                recommendations.append("Take a 5-minute break")
+                recommendations.append("Follow the 20-20-20 rule: Every 20 min, look 20 feet away for 20 sec")
+        elif has_irritation:
+            if max_severity >= 2:
+                recommendations.append("Apply preservative-free eye drops")
+                recommendations.append("Use a warm compress for 5-10 minutes")
+            else:
+                recommendations.append("Consider using lubricating eye drops")
+            recommendations.append("Avoid smoke, dust, and allergens")
+        
+        if asymmetric:
+            recommendations.append("Asymmetric redness detected - may indicate localized issue")
+            if max_severity >= 2:
+                recommendations.append("Monitor closely; see a doctor if it persists")
+        
+        # General wellness tips
+        if has_fatigue or has_irritation:
+            recommendations.append("Reduce screen brightness")
+            recommendations.append("Ensure proper lighting (avoid glare)")
+            recommendations.append("Stay hydrated - drink water")
+        
+        if not recommendations:
+            recommendations.append("Eyes appear healthy!")
+            recommendations.append("Keep maintaining good eye care habits")
+        
+        return recommendations
 
-            # DEBUG: Print number of faces found
-            # print(f"Faces Detected: {len(faces)}") 
+    def process_image(self, img_path):
+        frame = cv2.imread(img_path)
+        if frame is None: return None, []
 
-            for (x, y, w, h) in faces:
-                # Draw Blue Box around Face
-                cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
-                
-                roi_gray = gray[y:y+h, x:x+w]
-                roi_color = frame[y:y+h, x:x+w]
-                
-                # Detect Eyes (Relaxed settings for eyes too)
-                eyes = self.eye_cascade.detectMultiScale(roi_gray, scaleFactor=1.1, minNeighbors=4)
-                
-                eye_data = []
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # --- DETECTION PHASE ---
+        detected_eyes = [] 
+        
+        # Plan A: Face -> Eyes
+        faces = self.face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(100, 100))
+        for (fx, fy, fw, fh) in faces:
+            roi_gray = gray[fy:fy+fh, fx:fx+fw]
+            eyes = self.eye_cascade.detectMultiScale(roi_gray, 1.1, 6, minSize=(30, 30))
+            for (ex, ey, ew, eh) in eyes:
+                detected_eyes.append((fx+ex, fy+ey, ew, eh))
+        
+        # Plan B: Whole Image
+        if not detected_eyes:
+            detected_eyes_rects = self.eye_cascade.detectMultiScale(gray, 1.1, 5, minSize=(50, 50))
+            for (ex, ey, ew, eh) in detected_eyes_rects:
+                detected_eyes.append((ex, ey, ew, eh))
 
-                for (ex, ey, ew, eh) in eyes:
-                    eye_roi = roi_color[ey:ey+eh, ex:ex+ew]
-                    brightness, redness = self.analyze_eye_region(eye_roi)
-                    eye_data.append((brightness, redness))
-                    
-                    # Logic
-                    status = "Normal"
-                    box_color = (0, 255, 0)
-                    
-                    if redness > REDNESS_THRESHOLD:
-                        status = "Irritated"
-                        box_color = (0, 0, 255)
-                    elif brightness < FATIGUE_THRESHOLD:
-                        status = "Fatigue"
-                        box_color = (0, 255, 255)
+        # Fallback
+        if not detected_eyes:
+             h, w, _ = frame.shape
+             detected_eyes.append((0, 0, w, h))
 
-                    # Draw Eye Box
-                    cv2.rectangle(roi_color, (ex, ey), (ex+ew, ey+eh), box_color, 2)
-                    cv2.putText(roi_color, status, (ex, ey-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, box_color, 1)
+        # Sort Left to Right
+        detected_eyes.sort(key=lambda b: b[0])
+        
+        # --- ANALYSIS PHASE ---
+        results = []
+        
+        for i, (x, y, w, h) in enumerate(detected_eyes):
+            eye_roi = frame[y:y+h, x:x+w]
+            data = self.analyze_single_eye(eye_roi)
+            data['box'] = (x, y, w, h)
+            data['id'] = i + 1
+            results.append(data)
+            
+            # --- COLOR LOGIC FOR DUAL STATE ---
+            color = (0, 255, 0) # Green (Normal)
+            
+            if "Fatigue" in data['status'] and "Irritated" in data['status']:
+                color = (255, 165, 0) # Orange (Both)
+            elif "Irritated" in data['status']:
+                color = (255, 0, 0)   # Red
+            elif "Fatigue" in data['status']:
+                color = (255, 255, 0) # Yellow
+            
+            cv2.rectangle(frame_rgb, (x, y), (x+w, y+h), color, 2)
+            
+            # Use smaller font if text is long
+            font_scale = 0.4 if "&" in data['status'] else 0.6
+            cv2.putText(frame_rgb, f"{data['status']}", (x, y-10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 2)
 
-                # [cite_start]Symmetry Check (Only if 2 eyes found) [cite: 61]
-                if len(eye_data) == 2:
-                    diff_red = abs(eye_data[0][1] - eye_data[1][1])
-                    if diff_red > SYMMETRY_TOLERANCE:
-                         cv2.putText(frame, "SYMMETRY ALERT", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        # --- SYMMETRY CHECK ---
+        if len(results) == 2:
+            diff = abs(results[0]['redness'] - results[1]['redness'])
+            if diff > SYMMETRY_TOLERANCE:
+                h_img, w_img, _ = frame_rgb.shape
+                cv2.putText(frame_rgb, "SYMMETRY ALERT!", (int(w_img/2)-100, 50), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                print(f"  WARNING: Symmetry Alert: Redness Diff {diff*100:.1f}%")
 
-                # Name Tag
-                cv2.putText(frame, "Youssef Afify", (x, y+h+20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        # --- GENERATE RECOMMENDATIONS ---
+        recommendations = self.get_recommendations(results)
 
-            cv2.imshow('Eye State Analyzer', frame)
+        return frame_rgb, results, recommendations
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+# --- VISUALIZATION ---
+def show_full_report(orig_img, eye_results, filename, recommendations):
+    num_eyes = len(eye_results)
+    if num_eyes == 0:
+        print(f"ERROR: No eyes found in {filename}")
+        return
 
-        cap.release()
-        cv2.destroyAllWindows()
+    total_rows = 1 + num_eyes + 1  # +1 for recommendations row
+    fig = plt.figure(figsize=(10, 4 * total_rows))
+    
+    # 1. Main Image
+    ax_main = plt.subplot2grid((total_rows, 3), (0, 0), colspan=3)
+    ax_main.imshow(orig_img)
+    ax_main.set_title(f"Main Detection: {filename}", fontsize=14, fontweight='bold')
+    ax_main.axis('off')
+    
+    # 2. Individual Eyes
+    for i, res in enumerate(eye_results):
+        row = i + 1
+        
+        # Crop
+        ax_crop = plt.subplot2grid((total_rows, 3), (row, 0))
+        ax_crop.imshow(cv2.cvtColor(res['crop'], cv2.COLOR_BGR2RGB))
+        ax_crop.set_title(f"Eye {res['id']} (Cropped)")
+        ax_crop.axis('off')
+        
+        # Mask
+        ax_mask = plt.subplot2grid((total_rows, 3), (row, 1))
+        ax_mask.imshow(res['vessel_mask'], cmap='gray')
+        ax_mask.set_title("Sclera-Locked Vessels")
+        ax_mask.axis('off')
+        
+        # Stats with Severity
+        ax_text = plt.subplot2grid((total_rows, 3), (row, 2))
+        severity_labels = ["Normal", "Mild", "Moderate", "Severe"]
+        
+        stats_text = f"DIAGNOSIS: {res['status']}\n\n"
+        stats_text += f"Redness: {res['redness']*100:.2f}%\n"
+        stats_text += f"Brightness: {res['brightness']:.0f}\n"
+        stats_text += f"Severity: {severity_labels[res['severity']]}\n"
+        
+        ax_text.text(0.1, 0.5, stats_text, fontsize=11, va='center', family='monospace')
+        ax_text.axis('off')
 
+    # 3. Recommendations Section
+    rec_row = 1 + num_eyes
+    ax_rec = plt.subplot2grid((total_rows, 3), (rec_row, 0), colspan=3)
+    
+    rec_text = "RECOMMENDATIONS:\n" + "="*50 + "\n\n"
+    for rec in recommendations:
+        rec_text += f"{rec}\n"
+    
+    ax_rec.text(0.05, 0.95, rec_text, fontsize=11, va='top', family='monospace',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+    ax_rec.set_title("Action Plan", fontsize=13, fontweight='bold')
+    ax_rec.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+# --- MAIN ---
 if __name__ == "__main__":
-    app = EyeAnalyzer()
-    app.run()
+    lab = EyeLab()
+    
+    # AUTO-DETECT ALL JPG FILES
+    my_files = [f for f in os.listdir('.') if f.lower().endswith('.jpg')]
+    my_files.sort()
+    
+    if not my_files:
+        print("No .jpg files found in directory.")
+
+    for f in my_files:
+        print(f"\n{'='*60}")
+        print(f"Processing {f}")
+        print('='*60)
+        img_res, results, recommendations = lab.process_image(f)
+        
+        if img_res is not None:
+            # Print eye analysis
+            for res in results:
+                severity_labels = ["Normal", "Mild", "Moderate", "Severe"]
+                print(f"  Eye {res['id']}: [{res['status']}] - Severity: {severity_labels[res['severity']]}")
+                print(f"     Redness: {res['redness']*100:.1f}% | Brightness: {res['brightness']:.0f}")
+            
+            # Print recommendations
+            print(f"\nRECOMMENDATIONS:")
+            for rec in recommendations:
+                print(f"  {rec}")
+            
+            show_full_report(img_res, results, f, recommendations)
