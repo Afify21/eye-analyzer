@@ -12,8 +12,8 @@ except NameError:
 
 # --- CONFIGURATION ---
 # Severity Thresholds for Redness
-REDNESS_MILD = 0.15      # 15% - Mild irritation
-REDNESS_MODERATE = 0.17  # 18% - Moderate irritation
+REDNESS_MILD = 0.10      # 15% - Mild irritation
+REDNESS_MODERATE = 0.15  # 18% - Moderate irritation
 REDNESS_SEVERE = 0.19    # 36% - Severe irritation
 
 # Severity Thresholds for Fatigue (Brightness)
@@ -227,17 +227,22 @@ class EyeLab:
             data['id'] = i + 1
             results.append(data)
             
-            # --- COLOR LOGIC FOR DUAL STATE ---
+            # --- COLOR LOGIC BASED ON SEVERITY ---
             color = (0, 255, 0) # Green (Normal)
+            thickness = 2  # Default thickness
             
-            if "Fatigue" in data['status'] and "Irritated" in data['status']:
+            # Check for Severe Irritation first (Red with thicker box)
+            if "Severe" in data['status'] and "Irritation" in data['status']:
+                color = (255, 0, 0)   # Red for Severe Irritation
+                thickness = 4         # Thicker box for emphasis
+            elif "Fatigue" in data['status'] and "Irritation" in data['status']:
                 color = (255, 165, 0) # Orange (Both)
-            elif "Irritated" in data['status']:
-                color = (255, 0, 0)   # Red
+            elif "Irritation" in data['status']:
+                color = (255, 0, 0)   # Red (Any Irritation)
             elif "Fatigue" in data['status']:
-                color = (255, 255, 0) # Yellow
+                color = (255, 255, 0) # Yellow (Fatigue only)
             
-            cv2.rectangle(frame_rgb, (x, y), (x+w, y+h), color, 2)
+            cv2.rectangle(frame_rgb, (x, y), (x+w, y+h), color, thickness)
             
             # Use smaller font if text is long
             font_scale = 0.4 if "&" in data['status'] else 0.6
