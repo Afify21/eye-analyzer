@@ -191,7 +191,7 @@ if __name__ == "__main__":
     lab = EyeLab()
     
     # YOUR FILES
-    my_files = ['partred.jpg', 'red2.jpg', 'red.jpg'] 
+    my_files = ['irritated.jpg', 'red2.jpg', 'irritated2.jpg'] 
     
     for f in my_files:
         print(f"\n--- Processing {f} ---")
