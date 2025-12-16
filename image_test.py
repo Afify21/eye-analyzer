@@ -11,8 +11,8 @@ except NameError:
     print("⚠️ Jupyter mode detected.")
 
 # --- CONFIGURATION ---
-REDNESS_THRESH = 0.03  # 3% redness (Strict because we remove skin)
-FATIGUE_THRESH = 100   # Brightness < 100 means closed/dark
+REDNESS_THRESH = 0.2  # 3% redness (Strict because we remove skin)
+FATIGUE_THRESH = 80   # Brightness < 100 means closed/dark
 
 class EyeLab:
     def __init__(self):
@@ -178,7 +178,7 @@ if __name__ == "__main__":
     lab = EyeLab()
     
     # YOUR FILES
-    my_files = ['normal.jpg', 'irritated.jpg', 'halfhalf.jpg'] 
+    my_files = ['normal.jpg', 'red2.jpg', 'halfhalf.jpg'] 
     
     for f in my_files:
         print(f"\n--- Processing {f} ---")
