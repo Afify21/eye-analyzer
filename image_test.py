@@ -11,8 +11,9 @@ except NameError:
     print("⚠️ Jupyter mode detected.")
 
 # --- CONFIGURATION ---
-REDNESS_THRESH = 0.15  # 2% Redness (Strict for Sclera Lock)
-FATIGUE_THRESH = 130   # Brightness < 100 means Fatigue
+REDNESS_THRESH = 0.15  # 3% Redness (Adjusted for Sclera Lock)
+FATIGUE_THRESH = 130   # Brightness < 110 means Fatigue
+SYMMETRY_TOLERANCE = 0.02 # 2% difference triggers alert
 
 class EyeLab:
     def __init__(self):
@@ -140,6 +141,15 @@ class EyeLab:
             cv2.putText(frame_rgb, f"{data['status']}", (x, y-10), 
                         cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 2)
 
+        # --- SYMMETRY CHECK ---
+        if len(results) == 2:
+            diff = abs(results[0]['redness'] - results[1]['redness'])
+            if diff > SYMMETRY_TOLERANCE:
+                h_img, w_img, _ = frame_rgb.shape
+                cv2.putText(frame_rgb, "SYMMETRY ALERT!", (int(w_img/2)-100, 50), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                print(f"  ⚠️ Symmetry Alert: Redness Diff {diff*100:.1f}%")
+
         return frame_rgb, results
 
 # --- VISUALIZATION ---
@@ -190,8 +200,13 @@ def show_full_report(orig_img, eye_results, filename):
 if __name__ == "__main__":
     lab = EyeLab()
     
-    # YOUR FILES
-    my_files = ['red3.jpg', 'halfhalf2.jpg', 'halfhalf.jpg'] 
+    # AUTO-DETECT ALL JPG FILES
+    my_files = [f for f in os.listdir('.') if f.lower().endswith('.jpg')]
+    my_files.sort()
+    
+    if not my_files:
+        print("No .jpg files found in directory.")
+
     for f in my_files:
         print(f"\n--- Processing {f} ---")
         img_res, results = lab.process_image(f)
